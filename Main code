@@ -1,0 +1,524 @@
+#include <SimpleKalmanFilter.h>
+// Pin Definitions
+//actuator variables
+const int sliAct = 5, rotSliAct = 6, rotAct = 4;  //actuator pins, default value is HIGH
+const int openDir = 8, closeDir = 7;              //polarity of actuators
+
+//current sensor variables
+const int sensorPin = A0, sensorPin2 = A1, sensorPin3 = A2;  //Current sensor pins
+int n = 100;                                                 //n value used to calculate average current
+float voltage = 0, voltage2 = 0, voltage3 = 0, current = 0, current2 = 0, current3 = 0;
+float filteredCurrent = 0, filteredCurrent2 = 0, filteredCurrent3 = 0, averageCurrent = 0, averageCurrent2 = 0, averageCurrent3 = 0;  //1 is the rotSliAct, 2 is sliAct, 3 is rotAct
+float currentThreshold = 1.55, currentThreshold2 = 1.8;
+float currentAtLimit = 0.2;
+
+int time = 0, newtime = 0;
+
+//ir sensors, buttons, limit switches, and lights
+const int irPin = A3, irPin2 = 28, irPin3 = 24;
+const int closeButton = 26, openButton = 34;  //default value is LOW
+const int rotDownLS = 36, rotUpLS = 40;       //default value is LOW
+const int sliActLS = 23, rotSliActLS = 38;    //default value is LOW
+const int rotSliActTS = 44, sliActTS = 33;    //default value is HIGH
+const int lightStrip = 2; //set to HIGH to turn on lights
+const int irThreshold = 330;
+
+
+bool closed = false;
+int slidingTime = 17000;
+int rotatingTime = 27000;
+int statePos = 1;
+int savedTime = 0;
+int delayTime = 1000;
+int sliActTSCounter = 0;
+
+// Kalman Filter Initialization (Process Noise, Measurement Noise, Estimation Error)
+SimpleKalmanFilter kalman(0.2, 0.25, 0.01);  // Adjust Kalman filter parameters if needed (values prior to me editing were 0.2, 0.25, 0.01)
+SimpleKalmanFilter kalman2(0.2, 0.25, 0.01);
+SimpleKalmanFilter kalman3(0.2, 0.25, 0.01);
+// Calibration Offset for Zero Current
+float zeroCurrentOffset = 2.463;    // Default for ACS712 is 2.5V when no current is flowing, adjust if necessary
+float sensitivity = 0.185;          // Sensitivity for ACS712-5A in V/A
+float zeroCurrentOffset2 = 2.4633;  // Default for ACS712 is 2.5V when no current is flowing, adjust if necessary
+float zeroCurrentOffset3 = 2.46;    // Default for ACS712 is 2.5V when no current is flowing, adjust if necessary
+
+
+float readFilteredCurrent() {
+  // Read the analog sensor value
+  int rawValue = analogRead(sensorPin);
+  // Convert the raw value to a voltage (assuming 5V reference)
+  voltage = rawValue * (5.0 / 1023.0);
+  // Apply calibration offset if needed (e.g., if the voltage at 0A is not exactly 2.5V)
+  current = (abs(voltage) - zeroCurrentOffset) / sensitivity;  // Adjust voltage offset for ACS712
+  // Get the absolute value of the current
+  current = abs(current);  // Ensure the current is always positive
+  // Apply Kalman filter to smooth the current reading
+  return kalman.updateEstimate(current);  // Return the filtered current value
+}
+
+float readFilteredCurrent2() {
+  // Read the analog sensor value
+  int rawValue2 = analogRead(sensorPin2);
+  // Convert the raw value to a voltage (assuming 5V reference)
+  voltage2 = rawValue2 * (5.0 / 1023.0);
+  // Apply calibration offset if needed (e.g., if the voltage at 0A is not exactly 2.5V)
+  current2 = (abs(voltage2) - zeroCurrentOffset2) / sensitivity;  // Adjust voltage offset for ACS712
+  // Get the absolute value of the current
+  current2 = abs(current2);  // Ensure the current is always positive
+  // Apply Kalman filter to smooth the current reading
+  return kalman2.updateEstimate(current2);  // Return the filtered current value
+}
+float readFilteredCurrent3() {
+
+  // Read the analog sensor value
+  int rawValue3 = analogRead(sensorPin3);
+  // Convert the raw value to a voltage (assuming 5V reference)
+  voltage3 = rawValue3 * (5.0 / 1023.0);
+  // Apply calibration offset if needed (e.g., if the voltage at 0A is not exactly 2.5V)
+  current3 = (abs(voltage3) - zeroCurrentOffset3) / sensitivity;  // Adjust voltage offset for ACS712
+  // Get the absolute value of the current
+  current3 = abs(current3);  // Ensure the current is always positive
+  // Apply Kalman filter to smooth the current reading
+  return kalman3.updateEstimate(current3);  // Return the filtered current value
+}
+
+void setup() {
+  //8,7 -> toggle direction
+  //5/6 -> motor on/off
+  //4 -> rotating on/off
+  //oranges -> negative
+  //white/yellow -> positive
+
+  pinMode(sensorPin, INPUT);
+  pinMode(sensorPin2, INPUT);
+  pinMode(openDir, OUTPUT);
+  pinMode(closeDir, OUTPUT);
+  pinMode(sliAct, OUTPUT);
+  pinMode(rotSliAct, OUTPUT);
+  pinMode(rotAct, OUTPUT);
+  //  pinMode(irPin, INPUT);
+  pinMode(irPin2, INPUT);
+  pinMode(irPin3, INPUT);
+  pinMode(rotDownLS, INPUT);
+  digitalWrite(rotDownLS, HIGH);
+  pinMode(rotUpLS, INPUT);
+  digitalWrite(rotUpLS, HIGH);
+  pinMode(sliActLS, INPUT_PULLUP);
+  pinMode(rotSliActLS, INPUT_PULLUP);
+  pinMode(closeButton, INPUT_PULLUP);
+  pinMode(openButton, INPUT_PULLUP);
+  pinMode(lightStrip, OUTPUT);
+  digitalWrite(lightStrip, LOW);
+  pinMode(rotSliActTS, INPUT_PULLUP);
+  // attachInterrupt(digitalPinToInterrupt(openButton), stopFunction, FALLING);
+  Serial.begin(9600);
+
+  stop();
+}
+
+void openArms() {
+  Serial.println("open arms in function");
+  digitalWrite(openDir, HIGH);
+  digitalWrite(closeDir, LOW);
+  digitalWrite(sliAct, LOW);
+  delay(delayTime);
+  digitalWrite(rotSliAct, LOW);
+  digitalWrite(rotAct, HIGH);
+}
+
+void closeArms() {
+  Serial.println("close arms in function");
+  digitalWrite(openDir, LOW);
+  digitalWrite(closeDir, HIGH);
+  if (digitalRead(rotSliActLS) == LOW || digitalRead(rotSliActTS) == HIGH)
+    digitalWrite(rotSliAct, LOW);
+  delay(delayTime);
+  if (digitalRead(sliActLS) == LOW || digitalRead(sliActTS) == HIGH)
+    digitalWrite(sliAct, LOW);
+  else
+    Serial.println("sliding actuator already pressed in");
+  digitalWrite(rotAct, HIGH);
+}
+
+void stop() {
+  digitalWrite(openDir, HIGH);
+  digitalWrite(closeDir, HIGH);
+  digitalWrite(sliAct, HIGH);
+  digitalWrite(rotSliAct, HIGH);
+  digitalWrite(rotAct, HIGH);
+  delay(200);
+}
+
+void checkCurrentAverage() {
+  averageCurrent = 0;
+  averageCurrent2 = 0;
+  int i = 0;
+  int j = 0;
+  int k = 0;
+
+  while ((i < n) && (j < n) && (k < n)) {
+    filteredCurrent = readFilteredCurrent();
+    //    if (filteredCurrent > 0.2) {
+    averageCurrent += filteredCurrent;
+    i++;
+    //  }
+    filteredCurrent2 = readFilteredCurrent2();
+    //    if (filteredCurrent2 > 0.2) {
+    averageCurrent2 += filteredCurrent2;
+    j++;
+    filteredCurrent3 = readFilteredCurrent3();
+    //    if (filteredCurrent2 > 0.2) {
+    averageCurrent3 += filteredCurrent3;
+    k++;
+
+    //    }
+  }
+  averageCurrent = averageCurrent / (i + 1);
+  averageCurrent2 = averageCurrent2 / (j + 1);
+  averageCurrent3 = averageCurrent3 / (k + 1);
+}
+
+
+void printCurrents() {
+  // Send the time and current data to Serial Monitor for plotting
+  //  Serial.print(current, 3);         // Time in seconds with 3 decimal places
+  //  Serial.print(",");                // Comma separates the values for plotting
+  Serial.print(averageCurrent, 3);     // Current value in amperes with 3 decimal places
+  Serial.print(",");                   // Comma separates the values for plotting
+                                       //  Serial.print(current2, 3);
+                                       //  Serial.print(",");                   // Comma separates the values for plotting
+  Serial.println(averageCurrent2, 3);  // Current value in amperes
+  //  delay(500);                          // Wait for 500 ms before the next reading
+}
+
+
+bool breakConditions() {
+  checkCurrentAverage();
+  printCurrents();
+  /*  if (averageCurrent2 > currentThreshold2 || digitalRead(sliActLS) == HIGH || digitalRead(sliActTS) == LOW) {
+    digitalWrite(sliAct, HIGH);
+    Serial.println(averageCurrent2);
+    Serial.println(digitalRead(sliActLS));
+    Serial.println("sliding actuator current limit hit");
+  } */
+  if (averageCurrent2 > currentThreshold2) {
+    digitalWrite(sliAct, HIGH);
+    Serial.println(averageCurrent2);
+    Serial.println(digitalRead(sliActLS));
+    Serial.println("sliding actuator current limit hit");
+  }
+  if (digitalRead(sliActLS) == HIGH) {
+    digitalWrite(sliAct, HIGH);
+    Serial.println(digitalRead(sliActLS));
+    Serial.println("sliding actuator limit switch hit");
+  }
+  if (digitalRead(sliActTS) == LOW) {
+    digitalWrite(sliAct, HIGH);
+    Serial.println(averageCurrent2);
+    Serial.println(digitalRead(sliActTS));
+    Serial.println("sliding actuator tapeswitch hit");
+  }
+
+  if (averageCurrent > currentThreshold || digitalRead(rotSliActLS) == HIGH || digitalRead(rotSliActTS) == LOW) {
+    digitalWrite(rotSliAct, HIGH);
+    Serial.println(averageCurrent);
+    Serial.println("rotating sliding actuator current limit hit");
+  }
+
+  if (digitalRead(sliAct) == 1 && digitalRead(rotSliAct) == 1)
+    return false;
+  else
+    return true;
+}
+
+void rotateDown() {
+  Serial.println("rotating down in function");
+  digitalWrite(openDir, HIGH);
+  digitalWrite(closeDir, LOW);
+  digitalWrite(rotAct, LOW);
+  digitalWrite(rotSliAct, HIGH);
+  digitalWrite(sliAct, HIGH);
+  //  while (digitalRead(rotDownLS) == HIGH) {Serial.println("rotatingDown");}
+}
+
+void rotateUp() {
+  Serial.println("rotating up in function");
+  digitalWrite(openDir, LOW);
+  digitalWrite(closeDir, HIGH);
+  digitalWrite(rotAct, LOW);
+  digitalWrite(rotSliAct, HIGH);
+  digitalWrite(sliAct, HIGH);
+  //  while (digitalRead(rotUpLS) == HIGH) {Serial.println("rotatingUp");}
+}
+
+void openRotSliAct() {
+  Serial.println("opening rotsliAct in function");
+  digitalWrite(openDir, HIGH);
+  digitalWrite(closeDir, LOW);
+  digitalWrite(sliAct, HIGH);
+  digitalWrite(rotSliAct, LOW);
+  digitalWrite(rotAct, HIGH);
+}
+
+void closeRotSliAct() {
+  Serial.println("closing rotsliact in function");
+  if (digitalRead(rotSliActLS) == LOW || digitalRead(rotSliActTS) == HIGH) {
+    digitalWrite(openDir, LOW);
+    digitalWrite(closeDir, HIGH);
+    digitalWrite(sliAct, HIGH);
+    digitalWrite(rotSliAct, LOW);
+    digitalWrite(rotAct, HIGH);
+  }
+}
+
+void closeAllAct() {
+  digitalWrite(openDir, LOW);
+  digitalWrite(closeDir, HIGH);
+  digitalWrite(sliAct, LOW);
+  delay(delayTime);
+  digitalWrite(rotSliAct, LOW);
+  delay(delayTime);
+  digitalWrite(rotAct, LOW);
+}
+
+void openAllAct() {
+  digitalWrite(openDir, HIGH);
+  digitalWrite(closeDir, LOW);
+  digitalWrite(sliAct, LOW);
+  delay(delayTime);
+  digitalWrite(rotSliAct, LOW);
+  delay(delayTime);
+  digitalWrite(rotAct, LOW);
+}
+
+void checkState() {
+  if (digitalRead(rotUpLS) == HIGH) {
+    statePos = 1;
+  } else if (digitalRead(rotDownLS) == HIGH) {
+    statePos = 3;
+  } else if (digitalRead(rotDownLS) == LOW && digitalRead(rotUpLS) == LOW) {
+    statePos = 2;
+  }
+}
+
+void closingFunction() {
+  stop();
+  delay(200);
+  checkState();
+  Serial.print("State: ");
+  Serial.println(statePos);
+  if (statePos == 1) {
+    Serial.println("open rotating sliding actuator");
+    openRotSliAct();
+    int time = millis();
+    int newtime = millis();
+    while ((newtime - time + savedTime) < slidingTime) {
+      if (digitalRead(openButton) == HIGH || digitalRead(closeButton) == HIGH) {
+        Serial.println("Stop button pressed");
+        stop();
+        savedTime += millis() - time;
+        return;
+      }
+      checkCurrentAverage();
+      if (averageCurrent < currentAtLimit){
+        break;
+      }
+      newtime = millis();
+    }
+    statePos++;
+    savedTime = 0;
+    stop();
+    delay(delayTime);
+  }
+  if (statePos == 2) {
+    Serial.println("rotating down");
+    rotateDown();
+    time = millis();
+    newtime = millis();
+    while (((newtime - time) < rotatingTime) && digitalRead(rotDownLS) == LOW) {
+      if (digitalRead(openButton) == HIGH || digitalRead(closeButton) == HIGH) {
+        Serial.println("Stop button pressed");
+        stop();
+        return;
+      }
+      newtime = millis();
+    }
+    statePos++;
+    stop();
+    delay(delayTime);
+  }
+  if (statePos == 3) {
+    if (closed == false) {
+      Serial.println("closing arms");
+      closeArms();
+      delay(500);
+    } else {
+      Serial.println("Already closed");
+    }
+    time = millis();
+    newtime = millis();
+    while (breakConditions() && ((newtime - time + savedTime) < 25000)) {
+      if (digitalRead(openButton) == HIGH || digitalRead(closeButton) == HIGH) {
+        Serial.println("Stop button pressed");
+        stop();
+        savedTime += millis() - time;
+        return;
+      }
+      newtime = millis();
+    }
+    closed = true;
+    savedTime = 0;
+    stop();
+    delay(delayTime);
+  }
+}
+
+void openingFunction() {
+  stop();
+  delay(200);
+  checkState();
+  Serial.print("State: ");
+  Serial.println(statePos);
+  closed = false;
+  if (statePos == 3) {
+    Serial.println("opening arms");
+    openArms();
+    delay(delayTime);
+    int time = millis();
+    int newtime = millis();
+    while ((newtime - time + savedTime) < slidingTime) {
+      if (digitalRead(openButton) == HIGH || digitalRead(closeButton) == HIGH) {
+        Serial.println("Stop button pressed");
+        stop();
+        savedTime += millis() - time;
+        return;
+      }
+      checkCurrentAverage();
+      if (averageCurrent < currentAtLimit){
+        Serial.println("rotSliAct fully extended");
+        digitalWrite(rotSliAct, HIGH);
+      }
+      if (averageCurrent2 < currentAtLimit){
+        Serial.println("sliAct fully extended");
+        digitalWrite(sliAct, HIGH);
+      }
+      if (digitalRead(sliAct) == HIGH && digitalRead(rotSliAct) == HIGH){
+        Serial.println("both arms fully open");
+        break;
+      }
+      newtime = millis();
+    }
+    statePos--;
+    savedTime = 0;
+    stop();
+    delay(delayTime);
+  }
+  if (statePos == 2) {
+    Serial.println("rotating up");
+    rotateUp();
+    time = millis();
+    newtime = millis();
+    while (newtime - time < rotatingTime && digitalRead(rotUpLS) == LOW) {
+      if (digitalRead(openButton) == HIGH || digitalRead(closeButton) == HIGH) {
+        Serial.println("Stop button pressed bad");
+        stop();
+        return;
+      }
+      newtime = millis();
+    }
+    statePos--;
+    stop();
+    delay(delayTime);
+  }
+
+  if (statePos == 1 && digitalRead(rotSliActLS) == LOW) {
+    Serial.println("closing rotating sliding actuator");
+    closeRotSliAct();
+    time = millis();
+    newtime = millis();
+    while ((newtime - time + savedTime) < slidingTime && digitalRead(rotSliActLS) == LOW) {
+      if (digitalRead(openButton) == HIGH || digitalRead(closeButton) == HIGH) {
+        Serial.println("Stop button pressed");
+        stop();
+        savedTime += millis() - time;
+        return;
+      }
+      newtime = millis();
+    }
+    savedTime = 0;
+    stop();
+    delay(delayTime);
+  }
+}
+
+
+void loop() {
+
+  /*
+    time = millis();
+    newtime = millis();
+    openArms();
+   // delay(1000);
+    while (newtime - time < 5000) {
+      checkCurrentAverage();
+      printCurrents();
+      newtime = millis();
+    }
+
+    stop();
+    delay(1000);
+
+    time = millis();
+    newtime = millis();
+    closeArms();
+   // delay(1000);
+    while (newtime - time < 5000) {
+      checkCurrentAverage();
+      printCurrents();
+      newtime = millis();
+    }
+    stop();
+    delay(1000);
+ */
+  if (digitalRead(closeButton) == HIGH && (analogRead(irPin) >irThreshold)) {
+    digitalWrite(lightStrip,HIGH);
+    closingFunction();
+    digitalWrite(lightStrip,LOW);
+  } else if (digitalRead(openButton) == HIGH && (analogRead(irPin) > irThreshold)) {
+    digitalWrite(lightStrip, HIGH);
+    openingFunction();
+    digitalWrite(lightStrip, LOW);
+  }
+
+
+/*
+  if (digitalRead(closeButton) == HIGH && (digitalRead(irPin) == LOW || digitalRead(irPin2) == LOW)) {
+    stop();
+    delay(2000);
+    int time = millis();
+    int newTime = millis();
+    digitalWrite(openDir, LOW);
+    digitalWrite(closeDir, HIGH);
+    digitalWrite(sliAct, LOW);
+    digitalWrite(rotSliAct, HIGH);
+    digitalWrite(rotAct, HIGH);
+    delay(500);
+    while (breakConditions() && ((newtime - time) < 15000)) {
+      if (digitalRead(openButton) == HIGH || digitalRead(closeButton) == HIGH) {
+        Serial.println("Stop button pressed");
+        stop();
+        savedTime += millis() - time;
+        return;
+      }
+      newtime = millis();
+    }
+    stop();
+    delay(2000);
+  }
+  digitalWrite(openDir, HIGH);
+  digitalWrite(closeDir, LOW);
+  digitalWrite(sliAct, LOW);
+  digitalWrite(rotSliAct, HIGH);
+  digitalWrite(rotAct, HIGH);
+  */
+}
